@@ -158,6 +158,14 @@ export function ComposerEditor(props: ComposerEditorProps) {
     props.controller.onCursor(composerCursor(editor))
   }
 
+  const syncEditor = (target: HTMLDivElement) => {
+    const cursor = composerCursor(target)
+    const prompt = parseComposerEditor(target)
+    const attachments = props.controller.parts().filter(isAttachment)
+    localInput = true
+    props.controller.onInput(prompt.map((part) => part.content).join(""), [...prompt, ...attachments], cursor)
+  }
+
   const mode = createMemo(() => state.mode)
 
   const buttons = createMemo(() => ({
@@ -176,6 +184,11 @@ export function ComposerEditor(props: ComposerEditorProps) {
 
       return
     }
+
+    // Rewriting the editor DOM while an IME composition is active makes the
+    // browser cancel it mid-flight; the compositionend write-back reconciles
+    // state.
+    if (props.controller.imeActive()) return
 
     renderComposerEditor(editor, parts)
   })
@@ -315,17 +328,21 @@ export function ComposerEditor(props: ComposerEditorProps) {
                 "text-align": "start",
               }}
               onInput={(event) => {
-                const cursor = composerCursor(event.currentTarget)
-                const prompt = parseComposerEditor(event.currentTarget)
-                const attachments = props.controller.parts().filter(isAttachment)
-                localInput = true
-                props.controller.onInput(
-                  prompt.map((part) => part.content).join(""),
-                  [...prompt, ...attachments],
-                  cursor,
-                )
+                // Safari fires input (insertCompositionText) before
+                // compositionstart and on every composition keystroke; reacting
+                // here re-renders mid-composition and splits it into per-letter
+                // micro compositions. State is reconciled once by the
+                // compositionend write-back.
+                if (event.isComposing || props.controller.imeActive()) return
+                syncEditor(event.currentTarget)
               }}
               onKeyDown={(event) => {
+                // While composing (and shortly after compositionend) stay
+                // inert: dispatching here re-renders and makes the browser
+                // split the composition, and the confirming Enter must never
+                // submit.
+                if (props.controller.imeComposing(event)) return
+
                 // Capture the opening footprint before the controller applies its first history preview.
                 const height =
                   state.popover.type === "closed" && event.shiftKey && event.key === "ArrowUp"
@@ -346,15 +363,24 @@ export function ComposerEditor(props: ComposerEditorProps) {
                   return
                 }
 
-                if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+                if (event.key === "Enter" && !event.shiftKey) {
                   event.preventDefault()
 
                   if (event.repeat) return
                   props.controller.submit(mod ? { alternate: true } : undefined)
                 }
               }}
-              onKeyUp={updateCursor}
-              onPointerUp={updateCursor}
+              onCompositionStart={props.controller.onCompositionStart}
+              onCompositionEnd={(event) => {
+                props.controller.onCompositionEnd()
+                syncEditor(event.currentTarget)
+              }}
+              onKeyUp={() => {
+                if (!props.controller.imeActive()) updateCursor()
+              }}
+              onPointerUp={() => {
+                if (!props.controller.imeActive()) updateCursor()
+              }}
               onPaste={(event) => {
                 props.controller.onPaste(event)
                 // Programmatic multiline insertion does not reliably reveal the caret.
